@@ -16,6 +16,12 @@ def create_app() -> FastAPI:
         title="Lemtik Security Autonomous Control Layer",
         version="1.0.0",
     )
+
+    @app.get("/health")
+    @app.get("/api/v1/health")
+    async def _public_health() -> dict:
+        return {"status": "ok", "service": "autonomouscontroller", "environment": app.state.environment}
+
     app.include_router(router)
     app.state.environment = os.getenv("ENVIRONMENT", "production")
 
