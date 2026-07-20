@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import hmac
+import json
 from typing import Any
 
 
@@ -8,6 +10,62 @@ APPROVAL_RANK = {
     None: 0,
     "supervisor": 1,
     "manager": 2,
+}
+
+AUTOMATION_MODE_NAMES = {
+    0: "advisory_only",
+    1: "human_approval",
+    2: "policy_automation",
+    3: "emergency_response",
+}
+
+AUTOMATION_MODE_DEFAULT = 1
+
+MODE_2_AUTOMATED_ACTIONS = {
+    "cctv_activate",
+    "cctv_deactivate",
+    "cctv_stream_to_dashboard",
+    "cctv_snapshot",
+    "cctv_ptz_move",
+    "cctv_ptz_preset",
+    "elevator_get_status",
+    "gate_get_status",
+    "door_get_status",
+    "traffic_get_status",
+    "barrier_get_status",
+    "lock_get_status",
+    "intercom_get_status",
+    "siren_deactivate",
+    "siren_get_status",
+    "turnstile_get_status",
+}
+
+EMERGENCY_EXIT_LOCK_ACTIONS = {
+    "gate_lock",
+    "door_lock",
+    "door_lock_all_local",
+    "door_restrict_area",
+    "door_restrict_floors",
+    "lock_lock",
+    "lock_lock_zone",
+    "traffic_green_corridor",
+    "traffic_single_preempt",
+    "barrier_emergency_raise",
+    "turnstile_lock",
+    "turnstile_lockdown",
+}
+
+EMERGENCY_EXIT_TERMS = {
+    "emergency exit",
+    "emergency_exit",
+    "exit route",
+    "exit_route",
+    "fire exit",
+    "fire_exit",
+    "evac route",
+    "evac_route",
+    "evacuation route",
+    "evacuation_route",
 }
 
 
@@ -60,6 +118,13 @@ ACTION_ALIASES = {
     "set_waypoints": "drone_set_waypoints",
     "hover": "drone_hover",
     "land": "drone_land",
+    "activate_siren": "siren_activate",
+    "deactivate_siren": "siren_deactivate",
+    "test_siren": "siren_test",
+    "unlock_turnstile": "turnstile_unlock",
+    "lock_turnstile": "turnstile_lock",
+    "free_pass_turnstile": "turnstile_free_pass",
+    "turnstile_lockdown": "turnstile_lockdown",
 }
 
 DEVICE_ACTION_ALIASES = {
@@ -114,6 +179,19 @@ DEVICE_ACTION_ALIASES = {
         "set_waypoints": "drone_set_waypoints",
         "hover": "drone_hover",
         "land": "drone_land",
+    },
+    "smart_siren": {
+        "activate": "siren_activate",
+        "deactivate": "siren_deactivate",
+        "test": "siren_test",
+        "get_status": "siren_get_status",
+    },
+    "turnstile": {
+        "unlock": "turnstile_unlock",
+        "lock": "turnstile_lock",
+        "free_pass": "turnstile_free_pass",
+        "lockdown": "turnstile_lockdown",
+        "get_status": "turnstile_get_status",
     },
 }
 
@@ -702,6 +780,99 @@ CONSTRAINT_RULES.update(
             "log_level": "standard",
             "life_safety_risk": False,
         },
+        "siren_activate": {
+            "approval_level": "manager",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 1800,
+            "auto_revert": False,
+            "risk_level": "critical",
+            "log_level": "critical",
+            "life_safety_risk": True,
+        },
+        "siren_deactivate": {
+            "approval_level": "supervisor",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 1800,
+            "auto_revert": False,
+            "risk_level": "low",
+            "log_level": "high",
+            "life_safety_risk": False,
+        },
+        "siren_test": {
+            "approval_level": "supervisor",
+            "auto_execute": False,
+            "requires_active_incident": False,
+            "max_duration_seconds": 120,
+            "auto_revert": False,
+            "risk_level": "low",
+            "log_level": "standard",
+            "life_safety_risk": False,
+        },
+        "siren_get_status": {
+            "approval_level": None,
+            "auto_execute": True,
+            "requires_active_incident": False,
+            "max_duration_seconds": 30,
+            "auto_revert": False,
+            "risk_level": "low",
+            "log_level": "standard",
+            "life_safety_risk": False,
+        },
+        "turnstile_unlock": {
+            "approval_level": "supervisor",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 120,
+            "auto_revert": True,
+            "revert_action": "lock",
+            "risk_level": "medium",
+            "log_level": "high",
+            "life_safety_risk": False,
+        },
+        "turnstile_lock": {
+            "approval_level": "manager",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 120,
+            "auto_revert": True,
+            "revert_action": "unlock",
+            "risk_level": "high",
+            "log_level": "critical",
+            "life_safety_risk": True,
+        },
+        "turnstile_free_pass": {
+            "approval_level": "supervisor",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 120,
+            "auto_revert": False,
+            "risk_level": "medium",
+            "log_level": "high",
+            "life_safety_risk": False,
+        },
+        "turnstile_lockdown": {
+            "approval_level": "manager",
+            "auto_execute": False,
+            "requires_active_incident": True,
+            "max_duration_seconds": 120,
+            "auto_revert": True,
+            "revert_action": "unlock",
+            "risk_level": "critical",
+            "log_level": "critical",
+            "life_safety_risk": True,
+        },
+        "turnstile_get_status": {
+            "approval_level": None,
+            "auto_execute": True,
+            "requires_active_incident": False,
+            "max_duration_seconds": 30,
+            "auto_revert": False,
+            "risk_level": "low",
+            "log_level": "standard",
+            "life_safety_risk": False,
+        },
     }
 )
 
@@ -724,12 +895,85 @@ def requestor_has_role(requestor_role: str | None, required_role: str | None) ->
     return APPROVAL_RANK.get(requestor_role, 0) >= APPROVAL_RANK.get(required_role, 0)
 
 
+def normalize_automation_mode(value: Any) -> int:
+    try:
+        mode = int(value)
+    except (TypeError, ValueError):
+        return AUTOMATION_MODE_DEFAULT
+    return mode if mode in AUTOMATION_MODE_NAMES else AUTOMATION_MODE_DEFAULT
+
+
+def resolve_automation_mode(request: dict[str, Any]) -> int:
+    manifest = request.get("manifest") or {}
+    constraints = request.get("constraints") or {}
+    auth = request.get("authorisation") or {}
+    if "automation_mode" in request and request.get("automation_mode") is not None:
+        return normalize_automation_mode(request.get("automation_mode"))
+    if "automation_mode" in manifest and manifest.get("automation_mode") is not None:
+        return normalize_automation_mode(manifest.get("automation_mode"))
+    if "automation_mode" in constraints and constraints.get("automation_mode") is not None:
+        return normalize_automation_mode(constraints.get("automation_mode"))
+    if "automation_mode" in auth and auth.get("automation_mode") is not None:
+        return normalize_automation_mode(auth.get("automation_mode"))
+    return AUTOMATION_MODE_DEFAULT
+
+
+def canonical_signature_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def verify_signature(payload: dict[str, Any], signature: str | None, secret: str | None) -> bool:
+    if not signature or not secret:
+        return False
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        canonical_signature_payload(payload).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(digest, signature)
+
+
+def safety_override_reason(action_key: str, device: dict[str, Any], parameters: dict[str, Any]) -> str | None:
+    route_bits = parameters.get("route_ids")
+    route_text = " ".join(route_bits) if isinstance(route_bits, list) else ""
+    parts = [
+        action_key,
+        str(device.get("id", "")),
+        str(device.get("type", "")),
+        str(parameters.get("reason", "")),
+        str(parameters.get("zone", "")),
+        str(parameters.get("area", "")),
+        str(parameters.get("target_route", "")),
+        str(parameters.get("route", "")),
+        str(parameters.get("route_name", "")),
+        route_text,
+    ]
+    haystack = " ".join(part.lower() for part in parts if part)
+    if action_key in EMERGENCY_EXIT_LOCK_ACTIONS:
+        for term in EMERGENCY_EXIT_TERMS:
+            if term in haystack:
+                return f"Safety override: {action_key} cannot be applied to emergency exit or evacuation routes."
+    if ("emergency exit" in haystack or "evacuation route" in haystack) and action_key in {
+        "gate_lock",
+        "door_lock",
+        "door_lock_all_local",
+        "door_restrict_area",
+        "lock_lock",
+        "lock_lock_zone",
+        "turnstile_lock",
+        "turnstile_lockdown",
+    }:
+        return "Safety override: locking an emergency exit route is prohibited."
+    return None
+
+
 def validate_command(
     action_key: str,
     device: dict[str, Any],
     requestor: dict[str, Any],
     incident_id: str | None,
     approved_by: str | None,
+    bypass_approval: bool = False,
 ) -> dict[str, Any]:
     constraint = CONSTRAINT_RULES.get(action_key)
     if not constraint:
@@ -745,7 +989,7 @@ def validate_command(
         }
 
     approval_level = constraint["approval_level"]
-    if not constraint["auto_execute"]:
+    if not constraint["auto_execute"] and not bypass_approval:
         if not approved_by:
             return {
                 "valid": False,

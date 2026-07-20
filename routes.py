@@ -18,6 +18,9 @@ class ExecuteActionModel(BaseModel):
     org_id: str
     action: dict[str, Any]
     authorisation: dict[str, Any]
+    automation_mode: int | None = None
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict)
 
 
 class AutonomousActionModel(BaseModel):
@@ -25,6 +28,8 @@ class AutonomousActionModel(BaseModel):
     request_id: str
     action: dict[str, Any]
     authorisation: dict[str, Any]
+    automation_mode: int | None = None
+    manifest: dict[str, Any] = Field(default_factory=dict)
     constraints: dict[str, Any] = Field(default_factory=dict)
 
 

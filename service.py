@@ -8,7 +8,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from adapters import ADAPTERS, AdapterError
-from constraints import CONSTRAINT_RULES, resolve_action_key, validate_command
+from constraints import (
+    AUTOMATION_MODE_DEFAULT,
+    MODE_2_AUTOMATED_ACTIONS,
+    CONSTRAINT_RULES,
+    resolve_action_key,
+    resolve_automation_mode,
+    safety_override_reason,
+    validate_command,
+    verify_signature,
+)
 from crypto import decrypt_text, encrypt_text, redact_secret
 from store import STORE, now_iso, parse_iso
 
@@ -18,6 +27,9 @@ class AutonomousControlService:
         self.store = STORE
         self.scheduler = None
         self.encryption_key = os.getenv("DEVICE_CREDENTIALS_ENCRYPTION_KEY")
+        self.default_automation_mode = int(os.getenv("AUTOMATION_MODE_DEFAULT", str(AUTOMATION_MODE_DEFAULT)))
+        self.approval_signature_secret = os.getenv("APPROVAL_SIGNATURE_SECRET") or os.getenv("AUTOMATION_APPROVAL_SECRET")
+        self.playbook_signature_secret = os.getenv("PLAYBOOK_SIGNATURE_SECRET") or self.approval_signature_secret
         self.max_traffic_preemption_seconds = int(os.getenv("MAX_TRAFFIC_PREEMPTION_SECONDS", "600"))
         self.max_lockdown_seconds = int(os.getenv("MAX_LOCKDOWN_SECONDS", "1800"))
         self.max_elevator_hold_seconds = int(os.getenv("MAX_ELEVATOR_HOLD_SECONDS", "600"))
@@ -103,6 +115,149 @@ class AutonomousControlService:
                 record["connection_config"] = {}
             self.store.devices[device["id"]] = record
 
+    def _console_log(self, message: str, payload: dict[str, Any] | None = None) -> None:
+        event = {
+            "message": message,
+            "payload": payload or {},
+            "timestamp": now_iso(),
+        }
+        print(json.dumps(event, sort_keys=True), flush=True)
+
+    def _approval_signature_payload(
+        self,
+        request: dict[str, Any],
+        action_key: str,
+        device_id: str,
+        automation_mode: int,
+    ) -> dict[str, Any]:
+        auth = request.get("authorisation", {})
+        return {
+            "request_id": request.get("request_id"),
+            "org_id": request.get("org_id"),
+            "action_key": request.get("action", {}).get("action_key", action_key),
+            "device_id": device_id,
+            "parameters": request.get("action", {}).get("parameters", {}),
+            "approved_by": auth.get("approved_by"),
+            "approval_timestamp": auth.get("approval_timestamp"),
+            "automation_mode": automation_mode,
+        }
+
+    def _playbook_signature_payload(self, request: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "request_id": request.get("request_id"),
+            "org_id": request.get("org_id"),
+            "automation_mode": resolve_automation_mode(request),
+            "playbook_id": manifest.get("playbook_id") or manifest.get("name"),
+            "steps": manifest.get("steps", []),
+        }
+
+    def _signature_is_valid(self, payload: dict[str, Any], signature: str | None, playbook: bool = False) -> bool:
+        secret = self.playbook_signature_secret if playbook else self.approval_signature_secret
+        return verify_signature(payload, signature, secret)
+
+    def _fire_door_override_reason(self, action_key: str, device: dict[str, Any], parameters: dict[str, Any]) -> str | None:
+        if action_key not in {
+            "door_lock",
+            "door_lock_all_local",
+            "door_restrict_area",
+            "door_restrict_floors",
+            "gate_lock",
+            "lock_lock",
+            "lock_lock_zone",
+            "turnstile_lock",
+            "turnstile_lockdown",
+        }:
+            return None
+
+        combined = " ".join(
+            str(value).lower()
+            for value in (
+                parameters.get("reason"),
+                parameters.get("zone"),
+                parameters.get("area"),
+                parameters.get("route"),
+                parameters.get("route_name"),
+                parameters.get("target_route"),
+                parameters.get("door_type"),
+                parameters.get("emergency_mode"),
+                device.get("zone"),
+                device.get("area"),
+                device.get("type"),
+            )
+            if value is not None
+        )
+        if any(term in combined for term in ("fire door", "fire_door", "emergency exit", "emergency_exit", "evacuation route", "evacuation_route")):
+            return "Safety override: Fire door override blocked: safety rules prohibit locking or restricting fire exits and evacuation routes."
+        if parameters.get("fire_door") is True or parameters.get("override_fire_door") is True:
+            return "Safety override: Fire door override blocked: explicit fire-door override flags are not permitted."
+        return None
+
+    def _elevator_limit_check_reason(self, action_key: str, device: dict[str, Any], parameters: dict[str, Any]) -> str | None:
+        if not action_key.startswith("elevator_"):
+            return None
+
+        candidate_fields = [
+            "floor",
+            "target_floor",
+            "requested_floor",
+            "destination_floor",
+        ]
+        requested_floor = None
+        for field in candidate_fields:
+            value = parameters.get(field)
+            if value is not None:
+                try:
+                    requested_floor = int(value)
+                    break
+                except (TypeError, ValueError):
+                    return f"Safety override: Elevator limit check failed: {field} must be an integer floor value."
+
+        if requested_floor is None:
+            return None
+
+        min_floor = parameters.get("min_floor")
+        max_floor = parameters.get("max_floor")
+        device_min_floor = device.get("min_floor")
+        device_max_floor = device.get("max_floor")
+
+        def _int_or_none(value: Any) -> int | None:
+            try:
+                return None if value is None else int(value)
+            except (TypeError, ValueError):
+                return None
+
+        min_candidates = [_int_or_none(min_floor), _int_or_none(device_min_floor)]
+        max_candidates = [_int_or_none(max_floor), _int_or_none(device_max_floor)]
+        effective_min = max((value for value in min_candidates if value is not None), default=None)
+        effective_max = min((value for value in max_candidates if value is not None), default=None)
+
+        if effective_min is not None and requested_floor < effective_min:
+            return f"Safety override: Elevator limit check failed: requested floor {requested_floor} is below the permitted minimum floor {effective_min}."
+        if effective_max is not None and requested_floor > effective_max:
+            return f"Safety override: Elevator limit check failed: requested floor {requested_floor} exceeds the permitted maximum floor {effective_max}."
+        return None
+
+    def _safety_validator_reason(self, action_key: str, device: dict[str, Any], parameters: dict[str, Any]) -> str | None:
+        validators = (
+            self._fire_door_override_reason,
+            self._elevator_limit_check_reason,
+        )
+        for validator in validators:
+            reason = validator(action_key, device, parameters)
+            if reason:
+                return reason
+        return safety_override_reason(action_key, device, parameters)
+
+    def _policy_response(self, request_id: str, status: str, reason: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = {
+            "request_id": request_id,
+            "status": status,
+            "error": reason,
+        }
+        if extra:
+            payload["data"] = extra
+        return payload
+
     async def register_device(self, payload: dict[str, Any]) -> dict[str, Any]:
         device = {
             **payload,
@@ -154,10 +309,185 @@ class AutonomousControlService:
                 f"Action not supported by device: {action['action_key']}",
             )
 
+        automation_mode = resolve_automation_mode(request)
+        manifest = request.get("manifest") or {}
+        if automation_mode == 0:
+            self._console_log(
+                "Rejected - Level 0 Advisory",
+                {
+                    "request_id": request["request_id"],
+                    "action_key": action_key,
+                    "device_id": device_id,
+                    "automation_mode": automation_mode,
+                },
+            )
+            return self._policy_response(
+                request["request_id"],
+                "blocked",
+                "Automation mode 0 is advisory only; execution is disabled.",
+                {
+                    "automation_mode": automation_mode,
+                    "policy_decision": "advisory_only",
+                },
+            )
+
+        safety_reason = self._safety_validator_reason(action_key, device, action.get("parameters", {}))
+        if safety_reason:
+            self._console_log(
+                "safety_override_blocked",
+                {
+                    "request_id": request["request_id"],
+                    "action_key": action_key,
+                    "device_id": device_id,
+                    "reason": safety_reason,
+                    "automation_mode": automation_mode,
+                },
+            )
+            return self._policy_response(
+                request["request_id"],
+                "blocked",
+                safety_reason,
+                {
+                    "automation_mode": automation_mode,
+                    "policy_decision": "safety_override",
+                },
+            )
+
+        if automation_mode == 3 and isinstance(manifest.get("steps"), list) and manifest.get("steps"):
+            if not manifest.get("preapproved"):
+                return self._policy_response(
+                    request["request_id"],
+                    "blocked",
+                    "Emergency playbooks must be pre-approved before execution.",
+                    {
+                        "automation_mode": automation_mode,
+                        "policy_decision": "playbook_not_preapproved",
+                    },
+                )
+            playbook_signature = manifest.get("approval_signature") or manifest.get("signature")
+            if playbook_signature and not self._signature_is_valid(self._playbook_signature_payload(request, manifest), playbook_signature, playbook=True):
+                return self._policy_response(
+                    request["request_id"],
+                    "blocked",
+                    "Emergency playbook signature verification failed.",
+                    {
+                        "automation_mode": automation_mode,
+                        "policy_decision": "invalid_playbook_signature",
+                    },
+                )
+            self._console_log(
+                "playbook_start",
+                {
+                    "request_id": request["request_id"],
+                    "playbook_id": manifest.get("playbook_id") or manifest.get("name"),
+                    "steps": len(manifest["steps"]),
+                    "automation_mode": automation_mode,
+                },
+            )
+            results: list[dict[str, Any]] = []
+            for index, step in enumerate(manifest["steps"], start=1):
+                if not isinstance(step, dict):
+                    return self._policy_response(
+                        request["request_id"],
+                        "failed",
+                        f"Invalid playbook step at position {index}.",
+                    )
+                step_request = {
+                    "request_type": "autonomous_action",
+                    "request_id": f"{request['request_id']}-{index}",
+                    "org_id": request["org_id"],
+                    "action": {
+                        "action_key": step.get("action_key") or step.get("command"),
+                        "device_id": step.get("device_id") or step.get("target_id"),
+                        "parameters": step.get("parameters", {}),
+                    },
+                    "authorisation": request.get("authorisation", {}),
+                    "automation_mode": automation_mode,
+                    "manifest": {
+                        **{k: v for k, v in manifest.items() if k != "steps"},
+                        "preapproved": True,
+                    },
+                }
+                step_result = await self.execute(step_request, client_ip=client_ip)
+                results.append(step_result)
+                if step_result.get("status") not in {"success", "advisory"}:
+                    self._console_log(
+                        "playbook_failed",
+                        {
+                            "request_id": request["request_id"],
+                            "failed_step": index,
+                            "result": step_result,
+                        },
+                    )
+                    return self._policy_response(
+                        request["request_id"],
+                        "failed",
+                        "Emergency playbook failed during execution.",
+                        {
+                            "automation_mode": automation_mode,
+                            "playbook_results": results,
+                            "policy_decision": "playbook_failed",
+                        },
+                    )
+            self._console_log(
+                "playbook_complete",
+                {
+                    "request_id": request["request_id"],
+                    "playbook_id": manifest.get("playbook_id") or manifest.get("name"),
+                    "automation_mode": automation_mode,
+                },
+            )
+            return {
+                "request_id": request["request_id"],
+                "status": "success",
+                "data": {
+                    "automation_mode": automation_mode,
+                    "playbook_id": manifest.get("playbook_id") or manifest.get("name"),
+                    "playbook_results": results,
+                    "policy_decision": "playbook_executed",
+                },
+            }
+
         auth = request.get("authorisation", {})
         incident_id = auth.get("incident_id")
         approval_level = auth.get("approval_level")
         approved_by = auth.get("approved_by")
+        approval_signature = auth.get("approval_signature") or manifest.get("approval_signature") or manifest.get("signature")
+        policy_bypass = automation_mode == 2 and action_key in MODE_2_AUTOMATED_ACTIONS
+        if automation_mode == 3 and manifest.get("preapproved"):
+            policy_bypass = True
+        if automation_mode == 1:
+            if not self._signature_is_valid(self._approval_signature_payload(request, action_key, device_id, automation_mode), approval_signature):
+                return self._policy_response(
+                    request["request_id"],
+                    "blocked",
+                    "Human operator approval signature is required and must verify.",
+                    {
+                        "automation_mode": automation_mode,
+                        "policy_decision": "invalid_approval_signature",
+                    },
+                )
+        elif automation_mode == 2 and not policy_bypass:
+            if not self._signature_is_valid(self._approval_signature_payload(request, action_key, device_id, automation_mode), approval_signature):
+                return self._policy_response(
+                    request["request_id"],
+                    "blocked",
+                    "Policy automation requires human approval for this higher-risk action.",
+                    {
+                        "automation_mode": automation_mode,
+                        "policy_decision": "approval_required",
+                    },
+                )
+        elif automation_mode == 3 and not manifest.get("preapproved"):
+            return self._policy_response(
+                request["request_id"],
+                "blocked",
+                "Emergency response mode requires a pre-approved playbook manifest.",
+                {
+                    "automation_mode": automation_mode,
+                    "policy_decision": "playbook_required",
+                },
+            )
 
         validation = validate_command(
             action_key=action_key,
@@ -165,6 +495,7 @@ class AutonomousControlService:
             requestor={"approval_level": approval_level, "approved_by": approved_by},
             incident_id=incident_id,
             approved_by=approved_by,
+            bypass_approval=policy_bypass or automation_mode == 3,
         )
         if not validation["valid"]:
             return self._failure(request["request_id"], validation["reason"], validation)
@@ -201,6 +532,8 @@ class AutonomousControlService:
                 "approved_by": approved_by,
                 "approval_level": approval_level,
                 "approval_timestamp": auth.get("approval_timestamp"),
+                "automation_mode": automation_mode,
+                "policy_decision": "bypass" if policy_bypass else "standard",
                 "executed_at": now_iso(),
                 "execution_result": execution_result,
                 "adapter_used": adapter.name,
@@ -258,18 +591,20 @@ class AutonomousControlService:
             await self.store.update_override(active_override_id, auto_revert=True)
 
         response = {
-            "request_id": request["request_id"],
-            "status": "success",
-            "data": {
-                "action_log_id": log_entry["id"],
-                "device_id": device_id,
-                "device_name": device["name"],
-                "action_key": action_key,
-                "execution_result": execution_result,
-                "adapter_used": adapter.name,
-                "executed_at": log_entry["executed_at"],
-                "confirmed": result.get("success", False),
-                "auto_revert_scheduled": bool(active_override_id),
+                "request_id": request["request_id"],
+                "status": "success",
+                "data": {
+                    "action_log_id": log_entry["id"],
+                    "device_id": device_id,
+                    "device_name": device["name"],
+                    "action_key": action_key,
+                    "automation_mode": automation_mode,
+                    "policy_decision": "bypass" if policy_bypass else "standard",
+                    "execution_result": execution_result,
+                    "adapter_used": adapter.name,
+                    "executed_at": log_entry["executed_at"],
+                    "confirmed": result.get("success", False),
+                    "auto_revert_scheduled": bool(active_override_id),
                 "revert_at": revert_at,
                 "revert_action": validation["revert_action"],
                 "warnings": validation["warnings"],
