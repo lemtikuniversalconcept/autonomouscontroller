@@ -176,6 +176,11 @@ async def device_status(device_id: str) -> dict[str, Any]:
     return {"device_id": device_id, "status": device.get("status") if device else "unknown", "device": device}
 
 
+@router.post("/devices/{device_id}/check")
+async def check_device(device_id: str) -> dict[str, Any]:
+    return await SERVICE.check_device(device_id)
+
+
 @router.get("/log")
 async def action_log() -> list[dict[str, Any]]:
     return await SERVICE.log_query()

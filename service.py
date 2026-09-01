@@ -96,6 +96,29 @@ class AutonomousControlService:
                 },
                 "supported_actions": ["green_corridor", "single_preempt", "release_all", "release_intersection", "get_status"],
             },
+            {
+                "id": "CAM-001",
+                "org_id": "org_abc123",
+                "building_id": "BLD-001",
+                "name": "Lobby PTZ Camera",
+                "type": "sensor_camera",
+                "manufacturer": "Generic",
+                "model": "ONVIF PTZ",
+                "connection_type": "REST_API",
+                "connection_config": {
+                    "base_url": "https://example.invalid/api/camera",
+                    "auth_type": "api_key",
+                    "credentials": {"api_key": "redacted"},
+                    "action_paths": {
+                        "cctv_ptz_move": "/ptz/move",
+                        "cctv_ptz_preset": "/ptz/preset",
+                        "cctv_snapshot": "/snapshot",
+                        "cctv_activate": "/activate",
+                        "cctv_deactivate": "/deactivate",
+                    },
+                },
+                "supported_actions": ["ptz_move", "ptz_preset", "snapshot", "activate", "deactivate", "get_status"],
+            },
         ]
         for device in defaults:
             record = {
@@ -293,6 +316,17 @@ class AutonomousControlService:
     async def get_device(self, device_id: str) -> dict[str, Any] | None:
         device = await self.store.get_device(device_id)
         return self._redact_device(device) if device else None
+
+    async def check_device(self, device_id: str) -> dict[str, Any]:
+        device = await self.store.get_device(device_id)
+        if not device:
+            return {"device_id": device_id, "found": False}
+        device = self._materialize_device(device)
+        adapter = ADAPTERS.get(device["connection_type"])
+        if not adapter:
+            return {"device_id": device_id, "found": True, "connectivity": {"configured": False, "reachable": False, "error": f"Unsupported connection type: {device['connection_type']}"}}
+        connectivity = await adapter.check_connectivity(device)
+        return {"device_id": device_id, "found": True, "connectivity": connectivity}
 
     async def execute(self, request: dict[str, Any], client_ip: str | None = None) -> dict[str, Any]:
         action = request["action"]

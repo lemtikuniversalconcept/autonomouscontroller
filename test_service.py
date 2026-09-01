@@ -147,6 +147,48 @@ class AutonomousControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["data"]["automation_mode"], 1)
 
+    async def test_mode_two_camera_ptz_bypasses_approval(self) -> None:
+        payload = {
+            "request_type": "execute_action",
+            "request_id": "req-mode2-cam",
+            "org_id": "org_abc123",
+            "automation_mode": 2,
+            "action": {
+                "action_key": "ptz_move",
+                "device_id": "CAM-001",
+                "parameters": {"direction": "left", "degrees": 15},
+            },
+            "authorisation": {"requested_by": "ai_agent"},
+        }
+
+        dummy = DummyAdapter()
+        with patch.dict("adapters.ADAPTERS", {"MQTT": dummy, "REST_API": dummy, "HARDWARE_BRIDGE": dummy}):
+            result = await SERVICE.execute(payload, client_ip="127.0.0.1")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["data"]["policy_decision"], "bypass")
+
+    async def test_mode_one_camera_ptz_still_requires_signature(self) -> None:
+        payload = {
+            "request_type": "execute_action",
+            "request_id": "req-mode1-cam",
+            "org_id": "org_abc123",
+            "automation_mode": 1,
+            "action": {
+                "action_key": "ptz_move",
+                "device_id": "CAM-001",
+                "parameters": {"direction": "left", "degrees": 15},
+            },
+            "authorisation": {"requested_by": "ai_agent"},
+        }
+
+        dummy = DummyAdapter()
+        with patch.dict("adapters.ADAPTERS", {"MQTT": dummy, "REST_API": dummy, "HARDWARE_BRIDGE": dummy}):
+            result = await SERVICE.execute(payload, client_ip="127.0.0.1")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("signature", result["error"].lower())
+
     async def test_mode_three_preapproved_playbook_executes(self) -> None:
         payload = {
             "request_type": "execute_action",
