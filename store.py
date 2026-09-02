@@ -189,7 +189,15 @@ class AdaptiveStore:
         # dict_row makes cur.fetchall() rows behave like sqlite3.Row (mapping access,
         # dict(row) works) instead of psycopg's default plain tuples, which crashed
         # _load_state()'s dict(row) calls once real rows existed to load.
-        self._pg_conn = psycopg.connect(self._postgres_url, row_factory=dict_row)
+        #
+        # autocommit=True: this connection is a single long-lived object reused across
+        # every request for the life of the process, and nothing in this file ever calls
+        # .rollback(). Without autocommit, one failed statement (constraint violation,
+        # transient network hiccup) leaves Postgres in "current transaction is aborted"
+        # state permanently - every subsequent write on this connection then fails the
+        # same way until the process restarts. Autocommit makes each statement its own
+        # transaction, so one failure can't cascade into a total outage.
+        self._pg_conn = psycopg.connect(self._postgres_url, row_factory=dict_row, autocommit=True)
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 """
