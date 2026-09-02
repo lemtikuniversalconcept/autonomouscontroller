@@ -582,7 +582,20 @@ class AutonomousControlService:
             }
         )
 
-        await self._update_device_after_command(device_id, execution_result)
+        try:
+            command_summary = json.dumps(
+                {
+                    "action_key": action_key,
+                    "parameters": action.get("parameters", {}),
+                    "execution_result": execution_result,
+                    "response": result.get("response") if result.get("success") else result.get("error"),
+                    "at": now_iso(),
+                },
+                default=str,
+            )
+        except (TypeError, ValueError):
+            command_summary = execution_result
+        await self._update_device_after_command(device_id, command_summary)
 
         if not result.get("success"):
             return self._failure(request["request_id"], result.get("error", "Execution failed"), {
