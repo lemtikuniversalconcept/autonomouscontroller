@@ -10,8 +10,10 @@ from typing import Any
 
 try:
     import psycopg
+    from psycopg.rows import dict_row
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     psycopg = None
+    dict_row = None
 
 
 def now_iso() -> str:
@@ -184,7 +186,10 @@ class AdaptiveStore:
     def _init_postgres(self) -> None:
         if psycopg is None:
             raise RuntimeError("psycopg is required for PostgreSQL DATABASE_URL values.")
-        self._pg_conn = psycopg.connect(self._postgres_url)
+        # dict_row makes cur.fetchall() rows behave like sqlite3.Row (mapping access,
+        # dict(row) works) instead of psycopg's default plain tuples, which crashed
+        # _load_state()'s dict(row) calls once real rows existed to load.
+        self._pg_conn = psycopg.connect(self._postgres_url, row_factory=dict_row)
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 """
