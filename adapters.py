@@ -71,10 +71,24 @@ class RESTAdapter(BaseAdapter):
                 async with httpx.AsyncClient() as client:
                     response = await client.post(url, json=body, headers=headers, timeout=10.0)
                     response.raise_for_status()
-                    try:
-                        payload = response.json()
-                    except Exception:
-                        payload = {"text": response.text}
+                    content_type = response.headers.get("content-type", "")
+                    if content_type.startswith("image/"):
+                        # cctv_snapshot hits a camera's own snapshot endpoint, which returns raw
+                        # image bytes, not JSON - response.json() would throw and the old except
+                        # branch fell back to response.text, which mangles binary data through
+                        # UTF-8 decoding instead of preserving it. Base64-encode explicitly so the
+                        # image survives the round trip intact.
+                        import base64
+
+                        payload = {
+                            "image_base64": base64.b64encode(response.content).decode("ascii"),
+                            "content_type": content_type,
+                        }
+                    else:
+                        try:
+                            payload = response.json()
+                        except Exception:
+                            payload = {"text": response.text}
                     return {
                         "success": True,
                         "response": payload,

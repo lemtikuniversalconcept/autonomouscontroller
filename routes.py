@@ -155,6 +155,14 @@ async def list_devices() -> list[dict[str, Any]]:
     return await SERVICE.list_devices()
 
 
+# Registered before /devices/{device_id} deliberately - FastAPI matches path routes in
+# registration order, and "nearest-camera" would otherwise be captured as a device_id by the
+# path-param route below instead of reaching this one.
+@router.get("/devices/nearest-camera")
+async def nearest_camera(org_id: str, lat: float, lng: float, limit: int = 3) -> list[dict[str, Any]]:
+    return await SERVICE.nearest_camera_devices(org_id, lat, lng, limit)
+
+
 @router.get("/devices/{device_id}")
 async def get_device(device_id: str) -> dict[str, Any] | None:
     return await SERVICE.get_device(device_id)

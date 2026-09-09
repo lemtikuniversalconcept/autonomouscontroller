@@ -19,7 +19,10 @@ from constraints import (
     verify_signature,
 )
 from crypto import decrypt_text, encrypt_text, redact_secret
+from geo import bearing_degrees, compass_point, haversine_metres
 from store import STORE, now_iso, parse_iso
+
+CAMERA_CAPABLE_ACTIONS = {"cctv_snapshot", "cctv_ptz_move", "cctv_ptz_preset", "snapshot", "ptz_move", "ptz_preset"}
 
 
 class AutonomousControlService:
@@ -316,6 +319,35 @@ class AutonomousControlService:
     async def get_device(self, device_id: str) -> dict[str, Any] | None:
         device = await self.store.get_device(device_id)
         return self._redact_device(device) if device else None
+
+    async def nearest_camera_devices(self, org_id: str, lat: float, lng: float, limit: int = 3) -> list[dict[str, Any]]:
+        """Ranks this org's camera-capable devices by distance to (lat, lng), the entry point
+        for "point the nearest camera at this incident". A device counts as camera-capable if its
+        type says so or it lists any PTZ/snapshot action - type strings vary by integration, the
+        action list is what actually determines whether pan/capture will work."""
+        candidates = []
+        for device in await self.store.list_devices():
+            if device.get("org_id") != org_id:
+                continue
+            device_lat, device_lng = device.get("lat"), device.get("lng")
+            if device_lat is None or device_lng is None:
+                continue
+            supported = {str(a).lower() for a in (device.get("supported_actions") or [])}
+            is_camera = "camera" in str(device.get("type") or "").lower() or bool(supported & CAMERA_CAPABLE_ACTIONS)
+            if not is_camera:
+                continue
+            distance = haversine_metres(lat, lng, float(device_lat), float(device_lng))
+            bearing = bearing_degrees(float(device_lat), float(device_lng), lat, lng)
+            candidates.append(
+                {
+                    **self._redact_device(device),
+                    "distance_metres": round(distance, 1),
+                    "bearing_degrees": round(bearing, 1),
+                    "compass_direction": compass_point(bearing),
+                }
+            )
+        candidates.sort(key=lambda item: item["distance_metres"])
+        return candidates[:limit]
 
     async def check_device(self, device_id: str) -> dict[str, Any]:
         device = await self.store.get_device(device_id)
