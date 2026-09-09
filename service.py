@@ -688,6 +688,12 @@ class AutonomousControlService:
                 "revert_action": validation["revert_action"],
                 "warnings": validation["warnings"],
                 "active_override_id": active_override_id,
+                # The adapter's actual response was previously only written to the audit log,
+                # never returned here - a caller had no way to retrieve e.g. the image bytes
+                # cctv_snapshot's adapter response carries (see RESTAdapter.execute()'s
+                # image/* handling) without a second lookup. Safe to expose generally: this data
+                # already reaches the audit trail regardless of whether it's echoed back here.
+                "response": result.get("response"),
             },
         }
         return response
