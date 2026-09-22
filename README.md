@@ -41,3 +41,13 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - Adapter integrations are structured for HTTP, MQTT, and WebSocket bridge execution.
 - Secrets are redacted in API responses.
 # autonomouscontroller
+
+## License
+
+Proprietary — All Rights Reserved. See [LICENSE](./LICENSE). This code is
+shared publicly for evaluation purposes only; it is not licensed for reuse,
+modification, or redistribution.
+
+---
+
+© 2026 Lemtik Security. All rights reserved.
